@@ -1,449 +1,326 @@
-import 'package:flutter/material.dart';
-// Note: You must add 'http', 'just_audio', and 'file_picker' to your pubspec.yaml
-import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'package:just_audio/just_audio.dart';
-import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:audioplayers/audioplayers.dart';
 
-// --- Global Constants & Theme ---
-const Color primaryColor = Color(0xFF673AB7); // Deep Purple
-const Color accentColor = Color(0xFFE91E63); // Pink
-const TextStyle infoTextStyle = TextStyle(color: Colors.white70, fontSize: 14);
-
-// --- Main Application Widget ---
 void main() {
-  runApp(const MusicPlayerApp());
+  runApp(const TidalPlayerApp());
 }
 
-class MusicPlayerApp extends StatelessWidget {
-  const MusicPlayerApp({super.key});
+class TidalPlayerApp extends StatelessWidget {
+  const TidalPlayerApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Universal Music Player',
+      title: 'Tidal Player',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: primaryColor, brightness: Brightness.dark),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
         useMaterial3: true,
-        fontFamily: 'Inter',
       ),
-      home: const MusicPlayerScreen(),
+      home: const SearchPage(),
     );
   }
 }
 
-// --- Player Screen ---
-class MusicPlayerScreen extends StatefulWidget {
-  const MusicPlayerScreen({super.key});
+class SearchPage extends StatefulWidget {
+  const SearchPage({super.key});
 
   @override
-  State<MusicPlayerScreen> createState() => _MusicPlayerScreenState();
+  State<SearchPage> createState() => _SearchPageState();
 }
 
-class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
-  // Audio Player instance
-  final AudioPlayer _audioPlayer = AudioPlayer();
+class _SearchPageState extends State<SearchPage> {
+  final TextEditingController _controller = TextEditingController();
+  final AudioPlayer _player = AudioPlayer();
 
-  // Configuration and State
-  final TextEditingController _baseApiUrlController = TextEditingController(text: "https://tidal.401658.xyz");
-  final TextEditingController _searchController = TextEditingController(text: "Consequence");
+  bool _loading = false;
+  bool _isPlaying = false;
+  String? _currentTitle;
 
-  String _currentTrackTitle = "No Track Loaded";
-  String _currentTrackArtist = "Ready";
-  String? _currentStreamUrl;
-  String? _localFilePath;
-  bool _isLoading = false;
+  List<dynamic> _tracks = [];
+  List<Map<String, dynamic>> _queue = [];
+  List<Map<String, dynamic>> _playlist = [];
 
   @override
   void initState() {
     super.initState();
-    _initAudioPlayer();
-  }
-
-  void _initAudioPlayer() {
-    // Listen to player state changes
-    _audioPlayer.playerStateStream.listen((state) {
-      if (state.processingState == ProcessingState.ready) {
-        setState(() => _isLoading = false);
-      }
-      if (state.processingState == ProcessingState.loading) {
-        setState(() => _isLoading = true);
-      }
+    _player.onPlayerComplete.listen((event) {
+      _playNextInQueue();
     });
   }
-
-  // --- API Handlers ---
 
   Future<void> _searchTrack() async {
-    final query = _searchController.text.trim();
-    final baseUrl = _baseApiUrlController.text.trim();
-    if (query.isEmpty || baseUrl.isEmpty) return;
+    final query = _controller.text.trim();
+    if (query.isEmpty) return;
 
     setState(() {
-      _isLoading = true;
-      _currentTrackTitle = "Searching...";
-      _currentTrackArtist = "";
+      _loading = true;
+      _tracks = [];
     });
 
-    final searchUrl = Uri.parse('$baseUrl/search/?s=$query');
+    final url = Uri.parse('https://tidal.401658.xyz/search/?s=$query');
+    print('🔍 Searching tracks for query: $query');
+    print('🌍 API Request: $url');
 
     try {
-      final response = await http.get(searchUrl);
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final items = data['items'] as List;
-
-        if (items.isNotEmpty) {
-          final track = items[0];
-          final trackId = track['id'];
-          final title = track['title'];
-          final artist = track['artist']['name'];
-
-          setState(() {
-            _currentTrackTitle = title;
-            _currentTrackArtist = artist;
-          });
-
-          await _fetchStreamUrl(trackId, baseUrl);
+      final res = await http.get(url);
+      print('✅ Response Status: ${res.statusCode}');
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(res.body);
+        if (decoded is Map && decoded.containsKey('items')) {
+          setState(() => _tracks = decoded['items']);
         } else {
-          _updateStatus("No results found for '$query'.", isError: true);
+          setState(() => _tracks = []);
         }
-      } else {
-        _updateStatus("Search API failed: ${response.statusCode}", isError: true);
       }
     } catch (e) {
-      _updateStatus("Network Error during search: $e", isError: true);
+      print('🚨 Exception during search: $e');
+    } finally {
+      setState(() => _loading = false);
     }
-    setState(() => _isLoading = false);
   }
 
-  Future<void> _fetchStreamUrl(int trackId, String baseUrl) async {
-    _updateStatus("Fetching high-quality stream link...", isError: false);
-    final songUrl = Uri.parse('$baseUrl/song/?id=$trackId&quality=HI_RES');
+  Future<void> _playTrack(Map<String, dynamic> track) async {
+    final id = track['id'];
+    final title = track['title'] ?? 'Unknown Title';
+    final quality = track['audioQuality'] ?? 'LOSSLESS';
+
+    print('▶ Playing track: $title (ID: $id)');
+    final url = Uri.parse('https://tidal.401658.xyz/track/?id=$id&quality=$quality');
 
     try {
-      final response = await http.get(songUrl);
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final streamUrl = data['OriginalTrackUrl'];
-
-        if (streamUrl is String && streamUrl.isNotEmpty) {
-          setState(() {
-            _currentStreamUrl = streamUrl;
-            _updateStatus("Stream link ready.");
-          });
-        } else {
-          _updateStatus("Stream URL not found in response.", isError: true);
+      final res = await http.get(url);
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(res.body);
+        if (decoded is List && decoded.length > 2) {
+          final trackUrl = decoded[2]['OriginalTrackUrl'];
+          if (trackUrl != null && trackUrl.toString().isNotEmpty) {
+            await _player.stop();
+            await _player.play(UrlSource(trackUrl));
+            setState(() {
+              _isPlaying = true;
+              _currentTitle = title;
+            });
+          }
         }
-      } else {
-        _updateStatus("Song API failed: ${response.statusCode}", isError: true);
       }
     } catch (e) {
-      _updateStatus("Network Error fetching stream link: $e", isError: true);
+      print('🚨 Failed to play track: $e');
     }
   }
 
-  // --- Playback Handlers ---
-
-  Future<void> _playStream() async {
-    if (_currentStreamUrl != null) {
-      try {
-        await _audioPlayer.stop();
-        await _audioPlayer.setUrl(_currentStreamUrl!);
-        await _audioPlayer.play();
-        _updateStatus("Streaming: $_currentTrackTitle");
-      } catch (e) {
-        _updateStatus("Error loading stream: $e", isError: true);
-      }
+  void _playNextInQueue() {
+    if (_queue.isNotEmpty) {
+      final next = _queue.removeAt(0);
+      _playTrack(next);
     } else {
-      _updateStatus("No stream URL available. Please search first.", isError: true);
+      setState(() {
+        _isPlaying = false;
+        _currentTitle = null;
+      });
     }
   }
 
-  Future<void> _selectLocalFile() async {
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.audio,
-        allowMultiple: false,
-      );
-
-      if (result != null && result.files.single.path != null) {
-        setState(() {
-          _localFilePath = result.files.single.path;
-          _currentTrackTitle = result.files.single.name;
-          _currentTrackArtist = "Local File";
-          _currentStreamUrl = null; // Clear stream URL context
-          _updateStatus("Local file selected.");
-        });
-      }
-    } catch (e) {
-      _updateStatus("Error selecting local file: $e", isError: true);
-    }
-  }
-
-  Future<void> _playLocalFile() async {
-    if (_localFilePath != null) {
-      try {
-        await _audioPlayer.stop();
-        // Use setFilePath for local files
-        await _audioPlayer.setFilePath(_localFilePath!); 
-        await _audioPlayer.play();
-        _updateStatus("Playing local file: $_currentTrackTitle");
-      } catch (e) {
-        _updateStatus("Error playing local file: $e", isError: true);
-      }
+  void _togglePlayPause() async {
+    if (_isPlaying) {
+      await _player.pause();
+      setState(() => _isPlaying = false);
     } else {
-      _updateStatus("No local file selected.", isError: true);
+      await _player.resume();
+      setState(() => _isPlaying = true);
     }
   }
 
-  Future<void> _stopPlayback() async {
-    await _audioPlayer.stop();
-    _updateStatus("Playback stopped.");
-  }
-
-  // --- Utility ---
-
-  void _updateStatus(String message, {bool isError = false}) {
-    // Use a temporary snackbar for notifications
+  void _addToQueue(Map<String, dynamic> track) {
+    _queue.add(track);
+    print('➕ Added to queue: ${track['title']}');
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: isError ? accentColor : primaryColor,
-        duration: const Duration(seconds: 2),
-      ),
+      SnackBar(content: Text('Added to queue: ${track['title']}')),
     );
-    // Also update main status, though this example uses title/artist for main display
-    print("Status: $message");
+  }
+
+  void _addToPlaylist(Map<String, dynamic> track) {
+    _playlist.add(track);
+    print('🎵 Added to playlist: ${track['title']}');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Added to playlist: ${track['title']}')),
+    );
+  }
+
+  String _formatDuration(int seconds) {
+    final duration = Duration(seconds: seconds);
+    return '${duration.inMinutes}:${(duration.inSeconds % 60).toString().padLeft(2, '0')}';
   }
 
   @override
   void dispose() {
-    _audioPlayer.dispose();
-    _baseApiUrlController.dispose();
-    _searchController.dispose();
+    _player.dispose();
     super.dispose();
   }
 
-  // --- UI Builder ---
+  void _showQueue() {
+    showModalBottomSheet(
+      context: context,
+      builder: (_) => ListView.builder(
+        itemCount: _queue.length,
+        itemBuilder: (_, index) {
+          final track = _queue[index];
+          return ListTile(
+            title: Text(track['title']),
+            subtitle: Text(track['artist']?['name'] ?? 'Unknown Artist'),
+            onTap: () {
+              Navigator.pop(context);
+              _playTrack(track);
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  void _showPlaylist() {
+    showModalBottomSheet(
+      context: context,
+      builder: (_) => ListView.builder(
+        itemCount: _playlist.length,
+        itemBuilder: (_, index) {
+          final track = _playlist[index];
+          return ListTile(
+            title: Text(track['title']),
+            subtitle: Text(track['artist']?['name'] ?? 'Unknown Artist'),
+            onTap: () {
+              Navigator.pop(context);
+              _playTrack(track);
+            },
+          );
+        },
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Universal Music Player'),
-        centerTitle: true,
-        backgroundColor: Colors.black,
+        title: const Text('Tidal Player'),
+        actions: [
+          IconButton(icon: const Icon(Icons.queue_music), onPressed: _showQueue),
+          IconButton(icon: const Icon(Icons.playlist_play), onPressed: _showPlaylist),
+        ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20.0),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            // API Configuration Card
-            _buildConfigCard(),
-            const SizedBox(height: 20),
-
-            // Music Card (Info Display and Controls)
-            _buildMusicCard(),
-            const SizedBox(height: 30),
-            
-            // Local Playback Section
-            _buildLocalPlaybackSection(),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildConfigCard() {
-    return Card(
-      elevation: 8,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text("API Configuration", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: primaryColor)),
-            const SizedBox(height: 10),
             TextField(
-              controller: _baseApiUrlController,
+              controller: _controller,
               decoration: InputDecoration(
-                labelText: "Base API URL",
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                prefixIcon: const Icon(Icons.api, color: accentColor),
+                labelText: 'Enter track name',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.clear),
+                  onPressed: _controller.clear,
+                ),
               ),
-              style: infoTextStyle,
             ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMusicCard() {
-    final bool canPlayStream = _currentStreamUrl != null;
-    final bool canPlayLocal = _localFilePath != null;
-    final bool isPlaying = _audioPlayer.playerState.playing;
-
-    return Card(
-      elevation: 12,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Container(
-        padding: const EdgeInsets.all(24.0),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          gradient: const LinearGradient(
-            colors: [Color(0xFF1E1E2C), Color(0xFF3A005F)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        child: Column(
-          children: [
-            // Track Info Display
-            const Icon(Icons.music_note, size: 48, color: accentColor),
-            const SizedBox(height: 10),
-            Text(
-              _currentTrackTitle,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
-            ),
-            Text(
-              _currentTrackArtist,
-              textAlign: TextAlign.center,
-              style: infoTextStyle,
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              onPressed: _loading ? null : _searchTrack,
+              icon: const Icon(Icons.search),
+              label: const Text('Search'),
             ),
             const SizedBox(height: 20),
+            if (_loading)
+              const Center(child: CircularProgressIndicator())
+            else if (_tracks.isEmpty)
+              const Text('No results found.')
+            else
+              Expanded(
+                child: ListView.builder(
+                  itemCount: _tracks.length,
+                  itemBuilder: (context, index) {
+                    final track = _tracks[index];
+                    final title = track['title'] ?? 'Unknown Title';
+                    final artist = track['artist']?['name'] ?? 'Unknown Artist';
+                    final album = track['album']?['title'] ?? 'Unknown Album';
+                    final duration = track['duration'] ?? 0;
 
-            // Search Bar
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _searchController,
-                    decoration: InputDecoration(
-                      hintText: "Search for a song...",
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 15),
-                    ),
-                    onSubmitted: (_) => _searchTrack(),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                ElevatedButton(
-                  onPressed: _isLoading ? null : _searchTrack,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: primaryColor,
-                    padding: const EdgeInsets.symmetric(vertical: 18),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                  child: _isLoading 
-                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) 
-                      : const Icon(Icons.search, color: Colors.white),
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
+                    final coverId = track['album']?['cover'];
+                    final imageUrl = coverId != null
+                        ? 'https://resources.tidal.com/images/$coverId/320x320.jpg'
+                        : null;
 
-            // Stream Playback Control
-            ElevatedButton.icon(
-              onPressed: canPlayStream && !_isLoading ? _playStream : null,
-              icon: const Icon(Icons.cloud_download, color: Colors.white),
-              label: const Text('Play Streamed Track'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: canPlayStream ? accentColor : Colors.grey,
-                minimumSize: const Size(double.infinity, 50),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                textStyle: const TextStyle(fontWeight: FontWeight.bold),
+                    return Card(
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                      margin: const EdgeInsets.symmetric(vertical: 6),
+                      child: ListTile(
+                        leading: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: imageUrl != null
+                              ? Image.network(
+                                  imageUrl,
+                                  width: 55,
+                                  height: 55,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) =>
+                                      const Icon(Icons.music_note),
+                                )
+                              : const Icon(Icons.music_note, size: 40),
+                        ),
+                        title: Text(title,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 16)),
+                        subtitle: Text('$artist • $album'),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.play_arrow),
+                              onPressed: () => _playTrack(track),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.queue),
+                              onPressed: () => _addToQueue(track),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.playlist_add),
+                              onPressed: () => _addToPlaylist(track),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ),
-            ),
-            const SizedBox(height: 15),
-
-            // Universal Playback Controls
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: isPlaying ? () => _audioPlayer.pause() : () => _audioPlayer.play(),
-                    icon: Icon(isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled, size: 30),
-                    label: Text(isPlaying ? 'Pause' : 'Play'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: isPlaying ? Colors.orange : Colors.green,
-                      minimumSize: const Size(0, 50),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            if (_isPlaying && _currentTitle != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    IconButton(
+                      icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
+                      onPressed: _togglePlayPause,
                     ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _stopPlayback,
-                    icon: const Icon(Icons.stop_circle_filled, size: 30),
-                    label: const Text('Stop'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red.shade700,
-                      minimumSize: const Size(0, 50),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Text(
+                        "🎶 Now Playing: $_currentTitle",
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, color: Colors.blue),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLocalPlaybackSection() {
-    final bool canPlayLocal = _localFilePath != null;
-    return Card(
-      elevation: 8,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text("Local Playback", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: primaryColor)),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _localFilePath ?? "No local file selected.",
-                    overflow: TextOverflow.ellipsis,
-                    style: infoTextStyle,
-                  ),
-                ),
-                ElevatedButton(
-                  onPressed: _selectLocalFile,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blueGrey,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                  child: const Text('Browse File'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            ElevatedButton.icon(
-              onPressed: canPlayLocal ? _playLocalFile : null,
-              icon: const Icon(Icons.folder_open, color: Colors.white),
-              label: const Text('Play Local File'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: canPlayLocal ? primaryColor : Colors.grey,
-                minimumSize: const Size(double.infinity, 50),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
-            ),
           ],
         ),
       ),
     );
   }
 }
-
